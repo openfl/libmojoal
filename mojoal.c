@@ -11,13 +11,35 @@
 #include <float.h>
 
 #ifdef _MSC_VER
-#define AL_API __declspec(dllexport)
-#define ALC_API __declspec(dllexport)
+  #define AL_API __declspec(dllexport)
+  #define ALC_API __declspec(dllexport)
+  #if !defined(inline) && !defined(__cplusplus)
+    #define inline __inline
+  #endif
 #endif
 
 #include "AL/al.h"
 #include "AL/alc.h"
 #include "SDL.h"
+
+#ifdef __SSE__  /* if you are on x86 or x86-64, we assume you have SSE1 by now. */
+#define NEED_SCALAR_FALLBACK 0
+#elif (defined(__ARM_ARCH) && (__ARM_ARCH >= 8))  /* ARMv8 always has NEON. */
+#define NEED_SCALAR_FALLBACK 0
+#elif (defined(__APPLE__) && defined(__ARM_ARCH) && (__ARM_ARCH >= 7))   /* All ARMv7 chips from Apple have NEON. */
+#define NEED_SCALAR_FALLBACK 0
+#elif (defined(__WINDOWS__) || defined(__WINRT__)) && defined(_M_ARM)  /* all WinRT-level Microsoft devices have NEON */
+#define NEED_SCALAR_FALLBACK 0
+#else
+#define NEED_SCALAR_FALLBACK 1
+#endif
+
+/* Some platforms fail to define __ARM_NEON__, others need it or arm_neon.h will fail. */
+#if (defined(__ARM_ARCH) || defined(_M_ARM))
+#  if !NEED_SCALAR_FALLBACK && !defined(__ARM_NEON__)
+#    define __ARM_NEON__ 1
+#  endif
+#endif
 
 #ifdef __SSE__
 #include <xmmintrin.h>
@@ -82,7 +104,7 @@
   so deleting one while another thread is using it is your own fault. Don't
   do that.
 
-- Create or destroying a context will lock the SDL audio device, serializing
+- Creating or destroying a context will lock the SDL audio device, serializing
   these calls vs the mixer thread while we add/remove the context on the
   device's list. So don't do this in time-critical code.
 
@@ -153,7 +175,7 @@
 */
 
 
-#if 0
+#if 1
 #define FIXME(x)
 #else
 #define FIXME(x) { \
@@ -166,7 +188,7 @@
 #endif
 
 /* restrict is from C99, but __restrict works with both Visual Studio and GCC. */
-#if (!defined(__STDC_VERSION__) || (__STDC_VERSION__ < 199901))
+#if !defined(restrict) && ((!defined(__STDC_VERSION__) || (__STDC_VERSION__ < 199901)))
 #define restrict __restrict
 #endif
 
@@ -176,18 +198,6 @@
 #define SIMDALIGNEDSTRUCT struct __attribute__((aligned(16)))
 #else
 #define SIMDALIGNEDSTRUCT struct
-#endif
-
-#ifdef __SSE__  /* if you are on x86 or x86-64, we assume you have SSE1 by now. */
-#define NEED_SCALAR_FALLBACK 0
-#elif (defined(__ARM_ARCH) && (__ARM_ARCH >= 8))  /* ARMv8 always has NEON. */
-#define NEED_SCALAR_FALLBACK 0
-#elif (defined(__APPLE__) && defined(__ARM_ARCH) && (__ARM_ARCH >= 7))   /* All ARMv7 chips from Apple have NEON. */
-#define NEED_SCALAR_FALLBACK 0
-#elif (defined(__WINDOWS__) || defined(__WINRT__)) && defined(_M_ARM)  /* all WinRT-level Microsoft devices have NEON */
-#define NEED_SCALAR_FALLBACK 0
-#else
-#define NEED_SCALAR_FALLBACK 1
 #endif
 
 #ifdef __SSE__  /* we assume you always have this on x86/x86-64 chips. SSE1 is 20 years old! */
@@ -1046,6 +1056,8 @@ static void mix_buffer(const ALbuffer *buffer, const ALfloat * restrict panning,
             {
             #if NEED_SCALAR_FALLBACK
             mix_float32_c1_scalar(panning, data, stream, mixframes);
+            #else
+            SDL_assert(!"uhoh, we didn't compile in enough mixers!");
             #endif
             }
         } else {
@@ -1058,6 +1070,8 @@ static void mix_buffer(const ALbuffer *buffer, const ALfloat * restrict panning,
             {
             #if NEED_SCALAR_FALLBACK
             mix_float32_c2_scalar(panning, data, stream, mixframes);
+            #else
+            SDL_assert(!"uhoh, we didn't compile in enough mixers!");
             #endif
             }
         }
@@ -1237,10 +1251,10 @@ static __m128 xyzzy_sse(const __m128 a, const __m128 b)
 
 static ALfloat dotproduct_sse(const __m128 a, const __m128 b)
 {
-    FIXME("this can use _mm_hadd_ps in SSE3, or _mm_dp_ps in SSE4.1");
     const __m128 prod = _mm_mul_ps(a, b);
     const __m128 sum1 = _mm_add_ps(prod, _mm_shuffle_ps(prod, prod, _MM_SHUFFLE(1, 0, 3, 2)));
     const __m128 sum2 = _mm_add_ps(sum1, _mm_shuffle_ps(sum1, sum1, _MM_SHUFFLE(2, 2, 0, 0)));
+    FIXME("this can use _mm_hadd_ps in SSE3, or _mm_dp_ps in SSE4.1");
     return _mm_cvtss_f32(_mm_shuffle_ps(sum2, sum2, _MM_SHUFFLE(3, 3, 3, 3)));
 }
 
@@ -1262,11 +1276,11 @@ static __m128 normalize_sse(const __m128 v)
 #ifdef __ARM_NEON__
 static float32x4_t xyzzy_neon(const float32x4_t a, const float32x4_t b)
 {
-    FIXME("need a better permute");
     const float32x4_t shuf_a = { a[1], a[2], a[0], a[3] };
     const float32x4_t shuf_b = { b[1], b[2], b[0], b[3] };
     const float32x4_t v = vsubq_f32(vmulq_f32(a, shuf_b), vmulq_f32(b, shuf_a));
     const float32x4_t retval = { v[1], v[2], v[0], v[3] };
+    FIXME("need a better permute");
     return retval;
 }
 
@@ -3941,8 +3955,9 @@ void alDeleteBuffers(ALsizei n, const ALuint *names)
         const ALuint name = names[i];
         if (name != 0) {
             ALbuffer *buffer = get_buffer(ctx, name);
+            void *data;
             SDL_assert(buffer != NULL);
-            void *data = (void *) buffer->data;
+            data = (void *) buffer->data;
             if (!SDL_AtomicCAS(&buffer->allocated, 1, 0)) {
                 /* uh-oh!! */
             } else {
